@@ -5,8 +5,10 @@ from typing import Dict, List, Tuple, Any
 from .metrics import get_eval_metrics
 import time
 import torch
+import joblib, os
 
 def eval_linear(
+    fold: int,
     train_feats: torch.Tensor,
     train_labels: torch.Tensor,
     valid_feats: torch.Tensor,
@@ -17,6 +19,7 @@ def eval_linear(
     combine_trainval: bool = True,
     C: float = 1.0,
     prefix: str = "lin_",
+    model_save_path: str="",
     verbose: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
@@ -39,10 +42,9 @@ def eval_linear(
         dump: Dictionary containing predictions and probabilities.
     """
     if verbose:
-        print(f"Train Features Shape: {train_feats.shape}, Train Labels Shape: {train_labels.shape}")
+        print(f"Train Shape: {train_feats.shape}, Test Shape: {test_feats.shape}")
         if valid_feats is not None:
-            print(f"Validation Features Shape: {valid_feats.shape} , Validation Labels Shape: {valid_labels.shape}")
-        print(f"Test Features Shape: {test_feats.shape}, Test Labels Shape: {test_labels.shape}")
+            print(f"Validation Shape: {valid_feats.shape}")
     start = time.time()
     # train linear probe
     classifier = train_linear_probe(
@@ -55,6 +57,8 @@ def eval_linear(
         C=C,
         verbose=verbose,
     )
+    model_path = os.path.join(model_save_path, f"fold{fold}_logistic_regression.pkl")
+    joblib.dump(classifier, model_path)
     # test linear probe
     results, dump = test_linear_probe(classifier, test_feats, test_labels, prefix=prefix)
     if verbose:
@@ -62,6 +66,25 @@ def eval_linear(
 
     return results, dump
 
+def test_saved_logistic_model(test_feats: torch.Tensor, test_labels: torch.Tensor, model_path="logistic_regression.pkl"):
+    # Load trained logistic regression model
+    classifier = joblib.load(model_path)
+    #Get predictions
+    probs_all = classifier.predict_proba(test_feats)[:, 1]  # Probabilities for class 1
+    preds_all = classifier.predict(test_feats)  # Predicted class labels
+
+    # Convert labels to numpy
+    targets_all = test_labels.cpu().numpy()
+
+    # Compute evaluation metrics
+    eval_metrics = get_eval_metrics(targets_all, preds_all, probs_all, True, prefix="lin_")
+
+    # Print confusion matrix
+    conf_matrix = confusion_matrix(targets_all, preds_all)
+    print("Confusion Matrix:")
+    print(conf_matrix)
+
+    return eval_metrics
 
 
 
@@ -99,7 +122,6 @@ def train_linear_probe(
     classifier.fit(train_feats, train_labels)
     if verbose:
         print(f"Training complete. Coefficients shape: {classifier.coef_.shape}")
-
     return classifier
 
 
@@ -109,7 +131,6 @@ def test_linear_probe(
     test_labels: torch.Tensor,
     num_classes: int = None,
     prefix: str = "lin_",
-    verbose: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Evaluate a trained logistic regression classifier on the test set.

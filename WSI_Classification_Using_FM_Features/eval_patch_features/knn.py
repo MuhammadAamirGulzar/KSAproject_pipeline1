@@ -8,10 +8,13 @@ import torch
 from torch.nn.functional import normalize
 from torch.utils.data import Sampler
 from tqdm import tqdm
-
 from .metrics import get_eval_metrics
+from sklearn.metrics import confusion_matrix
+
+import joblib, os
 
 def eval_knn(
+    fold: int,
     train_feats: torch.Tensor,
     train_labels: torch.Tensor,
     val_feats: torch.Tensor,
@@ -21,31 +24,19 @@ def eval_knn(
     n_neighbors: int = 5,
     normalize_feats: bool = True,
     prefix: str = "knn_",
-    verbose: bool = True,
+    model_save_path: str="",
+    verbose: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """
-    Evaluate using K-Nearest Neighbors (KNN).
 
-    Args:
-        train_feats (torch.Tensor): Training features.
-        train_labels (torch.Tensor): Training labels.
-        test_feats (torch.Tensor): Test features.
-        test_labels (torch.Tensor): Test labels.
-        n_neighbors (int): Number of neighbors. Defaults to 5.
-        normalize_feats (bool): Whether to normalize features. Defaults to True.
-        prefix (str): Prefix for metrics. Defaults to "knn_".
-
-    Returns:
-        Tuple containing metrics and evaluation dump.
-    """
     if verbose:
         print(f"Train Features Shape: {train_feats.shape}, Train Label Shape: {train_labels.shape}")
         if val_feats is not None:
             print(f"Validation Features Shape: {val_feats.shape}, Validation Label Shape: {val_labels.shape}")
         print(f"Test Features Shape: {test_feats.shape}, Test Label Shape: {test_labels.shape}")
     # Combine train and validation data
-    train_feats = torch.cat((train_feats, val_feats), dim=0)
-    train_labels = torch.cat((train_labels, val_labels), dim=0)
+    if val_feats is not None:
+        train_feats = torch.cat((train_feats, val_feats), dim=0)
+        train_labels = torch.cat((train_labels, val_labels), dim=0)
     # Normalize features
     if normalize_feats:
         train_feats = normalize(train_feats, dim=-1, p=2)
@@ -60,7 +51,9 @@ def eval_knn(
     # Train KNN classifier
     knn = sklearn.neighbors.KNeighborsClassifier(n_neighbors=n_neighbors)
     knn.fit(train_feats_np, train_labels_np)
-
+    model_path = os.path.join(model_save_path, f"fold{fold}_knn_model.pkl")
+    joblib.dump(knn, model_path)
+    print(f"KNN model saved at: {model_save_path}")
     # Predict and evaluate
     predicted_labels = knn.predict(test_feats_np)
     metrics = get_eval_metrics(test_labels_np, predicted_labels, prefix=prefix)
@@ -70,3 +63,24 @@ def eval_knn(
     }
 
     return metrics, dump
+
+def test_saved_knn_model(test_feats: torch.Tensor, test_labels: torch.Tensor, model_path="knn_model.pkl"):
+    # Load trained KNN model
+    knn = joblib.load(model_path)
+
+    # Convert test features to numpy
+    test_feats_np = test_feats.numpy()
+    test_labels_np = test_labels.numpy()
+
+    # Get predictions
+    predicted_labels = knn.predict(test_feats_np)
+
+    # Compute evaluation metrics
+    eval_metrics = get_eval_metrics(test_labels_np, predicted_labels, prefix="knn_")
+
+    # Print confusion matrix
+    conf_matrix = confusion_matrix(test_labels_np, predicted_labels)
+    print("Confusion Matrix:")
+    print(conf_matrix)
+
+    return eval_metrics

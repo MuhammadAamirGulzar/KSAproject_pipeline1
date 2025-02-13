@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-import random
+import random, os
 import time
 from collections import defaultdict
 from typing import Tuple, Dict, Any, List
@@ -67,7 +67,7 @@ class ANNBinaryClassifier:
         if val_feats is not None:
             val_feats = val_feats.to(self.device)
             val_labels = val_labels.to(self.device)
-        if combine_trainval:
+        if combine_trainval and val_feats is not None:
             train_feats = torch.cat([train_feats, val_feats], dim=0)
             train_labels = torch.cat([train_labels, val_labels], dim=0)
         opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
@@ -119,6 +119,7 @@ class ANNBinaryClassifier:
 
 # Training and Evaluation Functions
 def eval_ANN(
+    fold: int,
     train_feats: torch.Tensor,
     train_labels: torch.Tensor,
     valid_feats: torch.Tensor,
@@ -126,15 +127,21 @@ def eval_ANN(
     test_feats: torch.Tensor,
     test_labels: torch.Tensor,
     input_dim: int = 512,
+    hidden_dim: int = 512,
     max_iter: int = 1000,
-    combine_trainval: bool = True,
+    combine_trainval: bool = False,
+    model_save_path: str="",
     verbose: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if verbose:
         print(f"Train Shape: {train_feats.shape}, Validation Shape: {valid_feats.shape}, Test Shape: {test_feats.shape}")
 
-    classifier = ANNBinaryClassifier(input_dim=input_dim, max_iter=max_iter, verbose=verbose)
+    classifier = ANNBinaryClassifier(input_dim=input_dim,hidden_dim=hidden_dim, max_iter=max_iter, verbose=verbose)
     train_loss, val_loss = classifier.fit(train_feats, train_labels, valid_feats, valid_labels, combine_trainval)
+
+    model_path = os.path.join(model_save_path, f"fold{fold}_trained_ann_model_{input_dim}.pth")
+    torch.save(classifier.model.state_dict(), model_path)
+    print(f"Model saved at: {model_path}")
 
     # Testing phase
     probs_all = classifier.predict_proba(test_feats).squeeze(-1).cpu().numpy()
@@ -154,6 +161,45 @@ def eval_ANN(
 
     return eval_metrics, dump
 
+
+def test_saved_ann_model(input_dim: int,hidden_dim:int ,test_feats: torch.Tensor,test_labels: torch.Tensor ,  model_path="best_ann_model.pth"):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ✅ Define the ANN model structure (Must match saved model)
+    model = torch.nn.Sequential(
+        torch.nn.Linear(input_dim, hidden_dim),
+        torch.nn.ReLU(),
+        torch.nn.BatchNorm1d(hidden_dim),
+        torch.nn.Dropout(0.5),
+        torch.nn.Linear(hidden_dim, 1)  # Output layer for binary classification
+    ).to(device)
+
+    # ✅ Load trained model weights
+    model.load_state_dict(torch.load(model_path))
+    model.eval()  # Set model to evaluation mode
+
+    # ✅ Convert test features to tensor
+    test_feats = test_feats.to(device)
+
+    # ✅ Get predictions
+    with torch.no_grad():
+        probabilities = torch.sigmoid(model(test_feats)).cpu().numpy()
+    
+    # Convert probabilities to class labels (binary classification)
+    predictions = (probabilities > 0.5).astype(int)
+
+    # Get test labels
+    test_labels = test_labels.cpu().numpy()
+
+    # Get evaluation metrics
+    eval_metrics = get_eval_metrics(test_labels, predictions, probabilities)
+    dump = {"preds_all": predictions, "probs_all": probabilities, "targets_all": test_labels}
+    # print confusion matrix
+    cm = confusion_matrix(test_labels, predictions)
+    print("Confusion Matrix:")
+    print(cm)
+
+    return eval_metrics, dump
 
 def plot_training_logs(training_logs):
     plt.figure(figsize=(10, 6))

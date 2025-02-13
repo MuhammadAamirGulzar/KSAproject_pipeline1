@@ -5,6 +5,7 @@ from PIL import Image
 import torch
 from torch.utils.data import Sampler, DataLoader, Dataset
 
+
 class PatchLoader(Dataset):
     def __init__(self, label_file, data_path, transform=None, num_samples=None, mode=2):     
         lib = pd.DataFrame(pd.read_csv(label_file, usecols=['WSI_Id', 'label_id'], keep_default_na=True))
@@ -33,7 +34,6 @@ class PatchLoader(Dataset):
                         # count = count + 1
                         t.append(os.path.join(cpath, f))
                 if len(t) > 0:
-                    t = t[:10]
                     slides.append(path)
                     tiles.extend(t)
                     ntiles.append(len(t))
