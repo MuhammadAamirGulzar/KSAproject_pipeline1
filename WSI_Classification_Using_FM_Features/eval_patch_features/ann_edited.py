@@ -19,95 +19,127 @@ import torch.nn as nn
 import torch.optim as optim
 
 # ANN Binary Classifier (Now Outputs Two Class Probabilities)
+
 class ANNBinaryClassifier:
-    def __init__(self, input_dim=512, hidden_dim=512, max_iter=100, C=1.0, verbose=True):
-        self.C = C
-        self.max_iter = max_iter
+    def __init__(
+        self,
+        input_dim=512,
+        hidden_dim=512,
+        max_iter=100,
+        lr=1e-4,
+        weight_decay=1e-4,
+        patience=10,
+        verbose=True
+    ):
         self.verbose = verbose
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
 
-        #Define the model (Two outputs for [MSS, MSI])
+        # Define the model (Two output logits, no Softmax)
+        # CrossEntropyLoss expects raw logits.
         self.model = nn.Sequential(
-            nn.Linear(self.input_dim, self.hidden_dim),
+            nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
-            nn.BatchNorm1d(self.hidden_dim),
-            nn.Dropout(0.5),
-            nn.Linear(self.hidden_dim, 2),  #   Now outputs [P(MSS), P(MSI)]
-            nn.Softmax(dim=1)  #   Ensure probabilities sum to 1
+            nn.BatchNorm1d(hidden_dim),
+            nn.Dropout(0.7),
+            nn.Linear(hidden_dim, 2)  # Outputs raw logits for [MSS, MSI]
         ).to(self.device)
 
-        #   Use CrossEntropyLoss (since we now have two outputs)
         self.loss_func = nn.CrossEntropyLoss()
 
-    def compute_loss(self, preds, labels):
-        return self.loss_func(preds, labels)
+        # Optimizer & Scheduler
+        self.lr = lr
+        self.weight_decay = weight_decay
+        self.max_iter = max_iter
+        self.patience = patience
+
+    def compute_loss(self, logits, labels):
+        # labels shape: (batch,) containing class indices
+        return self.loss_func(logits, labels)
 
     def predict_proba(self, feats):
-        feats = feats.to(self.device)
+        """
+        Returns probabilities [P(MSS), P(MSI)] for each sample.
+        """
         self.model.eval()
+        feats = feats.to(self.device)
         with torch.no_grad():
-            return self.model(feats)  #   Now returns two probabilities per sample
+            logits = self.model(feats)
+            # Convert logits to probabilities
+            probs = torch.softmax(logits, dim=1)
+        return probs
 
     def fit(self, train_feats, train_labels, val_feats=None, val_labels=None, combine_trainval=False):
         train_feats, train_labels = train_feats.to(self.device), train_labels.to(self.device)
         if val_feats is not None:
             val_feats, val_labels = val_feats.to(self.device), val_labels.to(self.device)
+        
         if combine_trainval and val_feats is not None:
             train_feats = torch.cat([train_feats, val_feats], dim=0)
             train_labels = torch.cat([train_labels, val_labels], dim=0)
+            # Setting val_feats = None ensures only a single training set
+            val_feats, val_labels = None, None
 
-        # opt = optim.Adam(self.model.parameters(), lr=1e-4)
-        # scheduler = optim.lr_scheduler.StepLR(opt, step_size=30, gamma=0.1)  #   Using original StepLR
-        opt = optim.Adam(self.model.parameters(), lr=1e-4, weight_decay=1e-4)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.3, patience=5, verbose=True)
+        # Adam Optimizer with ReduceLROnPlateau
+        opt = optim.Adam(self.model.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            opt, mode='min', factor=0.3, patience=5, verbose=self.verbose
+        )
+
+        best_val_loss = float("inf")
+        epochs_no_improve = 0
 
         train_loss_history, val_loss_history = [], []
-        best_val_loss = float("inf")
-        patience, epochs_no_improve = 10, 0
 
         for epoch in range(self.max_iter):
             self.model.train()
-            preds = self.model(train_feats)
-            loss = self.compute_loss(preds, train_labels)
+
+            # Forward pass
+            logits = self.model(train_feats)
+            loss = self.compute_loss(logits, train_labels)
+
+            # Backprop
             opt.zero_grad()
             loss.backward()
             opt.step()
 
-            train_loss_history.append(loss.item())
+            train_loss = loss.item()
+            train_loss_history.append(train_loss)
 
-            # Validation phase
+            # Validation phase (only if we have a separate validation set)
             val_loss = None
-            if val_feats is not None and not combine_trainval:
+            if val_feats is not None:
                 self.model.eval()
                 with torch.no_grad():
-                    val_preds = self.model(val_feats)
-                    val_loss = self.compute_loss(val_preds, val_labels)
+                    val_logits = self.model(val_feats)
+                    val_loss_tensor = self.compute_loss(val_logits, val_labels)
+                    val_loss = val_loss_tensor.item()
+                    val_loss_history.append(val_loss)
 
-                val_loss_history.append(val_loss.item())
+                # Scheduler step & early stopping
+                scheduler.step(val_loss_tensor)
 
-                # Early stopping
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     epochs_no_improve = 0
                 else:
                     epochs_no_improve += 1
-                    if epochs_no_improve >= patience:
+                    if epochs_no_improve >= self.patience:
                         if self.verbose:
                             print(f"Early stopping at epoch {epoch}")
                         break
-
-            #   Keep StepLR scheduler
-            if val_loss is not None:
-                scheduler.step(val_loss)  # Call with val_loss if available
             else:
-                scheduler.step(loss)  # Call without val_loss when validation data is missing
+                # If no validation set is used, we just pass training loss to the scheduler
+                scheduler.step(loss)
 
-            if self.verbose and epoch % 10 == 0:
-                print(f"Epoch {epoch}: Loss: {loss:.3f}, Val Loss: {val_loss:.3f}" if val_loss else f"Epoch {epoch}: Loss: {loss:.3f}")
+            # Logging
+            if self.verbose and (epoch % 10 == 0):
+                if val_loss is not None:
+                    print(f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+                else:
+                    print(f"Epoch {epoch} | Train Loss: {train_loss:.4f}")
 
         return train_loss_history, val_loss_history
+
 
 
 # Training and Evaluation Functions
@@ -123,7 +155,7 @@ def eval_ANN(
     hidden_dim: int = 512,
     max_iter: int = 1000,
     combine_trainval: bool = False,
-    model_save_path: str=None,
+    model_save_path: str="",
     verbose: bool = False,
 ) -> tuple:
     if verbose:
@@ -131,10 +163,10 @@ def eval_ANN(
 
     classifier = ANNBinaryClassifier(input_dim=input_dim, hidden_dim=hidden_dim, max_iter=max_iter, verbose=verbose)
     train_loss, val_loss = classifier.fit(train_feats, train_labels, valid_feats, valid_labels, combine_trainval)
-    if model_save_path is not None:
-        #   Save model
-        model_path = os.path.join(model_save_path, f"fold{fold}_trained_ann_model_{input_dim}.pth")
-        torch.save(classifier.model.state_dict(), model_path)
+
+    #   Save model
+    model_path = os.path.join(model_save_path, f"fold{fold}_trained_ann_model_{input_dim}.pth")
+    torch.save(classifier.model.state_dict(), model_path)
 
     #   Testing phase
     probs_all = classifier.predict_proba(test_feats).cpu().numpy()

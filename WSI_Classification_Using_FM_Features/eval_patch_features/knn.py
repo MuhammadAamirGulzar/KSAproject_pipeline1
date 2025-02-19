@@ -10,7 +10,8 @@ from torch.utils.data import Sampler
 from tqdm import tqdm
 from .metrics import get_eval_metrics
 from sklearn.metrics import confusion_matrix
-
+from sklearn.model_selection import GridSearchCV
+from sklearn.neighbors import KNeighborsClassifier
 import joblib, os
 
 def eval_knn(
@@ -24,15 +25,10 @@ def eval_knn(
     n_neighbors: int = 5,
     normalize_feats: bool = True,
     prefix: str = "knn_",
-    model_save_path: str="",
+    model_save_path: str=None,
     verbose: bool = False,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
-    if verbose:
-        print(f"Train Features Shape: {train_feats.shape}, Train Label Shape: {train_labels.shape}")
-        if val_feats is not None:
-            print(f"Validation Features Shape: {val_feats.shape}, Validation Label Shape: {val_labels.shape}")
-        print(f"Test Features Shape: {test_feats.shape}, Test Label Shape: {test_labels.shape}")
     # Combine train and validation data
     if val_feats is not None:
         train_feats = torch.cat((train_feats, val_feats), dim=0)
@@ -49,19 +45,25 @@ def eval_knn(
     test_labels_np = test_labels.numpy()
 
     # Train KNN classifier
-    knn = sklearn.neighbors.KNeighborsClassifier(n_neighbors=n_neighbors)
+    param_grid = {'n_neighbors': [3, 5, 7, 10, 15], 'metric': ['cosine', 'euclidean','minkowski'], 'weights': ['uniform', 'distance']}
+    knn = GridSearchCV(KNeighborsClassifier(), param_grid, n_jobs=-1, verbose=0, scoring='roc_auc')
     knn.fit(train_feats_np, train_labels_np)
-    model_path = os.path.join(model_save_path, f"fold{fold}_knn_model.pkl")
-    joblib.dump(knn, model_path)
-    print(f"KNN model saved at: {model_save_path}")
+    if verbose:
+        print(f"Best Params: {knn.best_params_}")
+        print(f"Best AUROC score: {knn.best_score_}")
+    knn = knn.best_estimator_
+    if model_save_path is not None:
+        # Save model
+        model_path = os.path.join(model_save_path, f"fold{fold}_knn_model.pkl")
+        joblib.dump(knn, model_path)
     # Predict and evaluate
     predicted_labels = knn.predict(test_feats_np)
-    metrics = get_eval_metrics(test_labels_np, predicted_labels, prefix=prefix)
+    probs_all = knn.predict_proba(test_feats_np)
+    metrics = get_eval_metrics(test_labels_np, predicted_labels,probs_all, prefix=prefix)
     dump = {
         "predicted_labels": predicted_labels,
         "targets": test_labels_np,
     }
-
     return metrics, dump
 
 def test_saved_knn_model(test_feats: torch.Tensor, test_labels: torch.Tensor, model_path="knn_model.pkl"):
@@ -74,13 +76,9 @@ def test_saved_knn_model(test_feats: torch.Tensor, test_labels: torch.Tensor, mo
 
     # Get predictions
     predicted_labels = knn.predict(test_feats_np)
+    probs_all = knn.predict_proba(test_feats_np)    # Probabilities for each class
 
     # Compute evaluation metrics
-    eval_metrics = get_eval_metrics(test_labels_np, predicted_labels, prefix="knn_")
-
-    # Print confusion matrix
-    conf_matrix = confusion_matrix(test_labels_np, predicted_labels)
-    print("Confusion Matrix:")
-    print(conf_matrix)
+    eval_metrics = get_eval_metrics(test_labels_np, predicted_labels,probs_all,True, prefix="knn_")
 
     return eval_metrics

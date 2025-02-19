@@ -19,7 +19,7 @@ def eval_linear(
     combine_trainval: bool = True,
     C: float = 1.0,
     prefix: str = "lin_",
-    model_save_path: str="",
+    save_path: str=None,
     verbose: bool = True,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
@@ -57,10 +57,11 @@ def eval_linear(
         C=C,
         verbose=verbose,
     )
-    model_path = os.path.join(model_save_path, f"fold{fold}_logistic_regression.pkl")
-    joblib.dump(classifier, model_path)
+    if save_path is not None:
+        model_path = os.path.join(save_path, f"fold{fold}_logistic_regression.pkl")
+        joblib.dump(classifier, model_path)
     # test linear probe
-    results, dump = test_linear_probe(classifier, test_feats, test_labels, prefix=prefix)
+    results, dump = test_linear_probe(classifier, test_feats, test_labels, prefix=prefix)    
     if verbose:
         print(f"Linear Probe Evaluation Time: {time.time() - start:.3f} s")
 
@@ -70,20 +71,13 @@ def test_saved_logistic_model(test_feats: torch.Tensor, test_labels: torch.Tenso
     # Load trained logistic regression model
     classifier = joblib.load(model_path)
     #Get predictions
-    probs_all = classifier.predict_proba(test_feats)[:, 1]  # Probabilities for class 1
+    probs_all = classifier.predict_proba(test_feats)  # Probabilities for class 1
     preds_all = classifier.predict(test_feats)  # Predicted class labels
 
     # Convert labels to numpy
     targets_all = test_labels.cpu().numpy()
-
     # Compute evaluation metrics
     eval_metrics = get_eval_metrics(targets_all, preds_all, probs_all, True, prefix="lin_")
-
-    # Print confusion matrix
-    conf_matrix = confusion_matrix(targets_all, preds_all)
-    print("Confusion Matrix:")
-    print(conf_matrix)
-
     return eval_metrics
 
 
@@ -149,20 +143,16 @@ def test_linear_probe(
     NUM_C = len(set(test_labels.cpu().numpy())) if num_classes is None else num_classes
     # predict and get probabilities 
     if NUM_C == 2:
-        probs_all = classifier.predict_proba(test_feats)[:, 1]
+        probs_all = classifier.predict_proba(test_feats)
         roc_kwargs = {}
     else:
         probs_all = classifier.predict_proba(test_feats)
         roc_kwargs = {"multi_class": "ovo", "average": "macro"}
 
-
     preds_all = classifier.predict(test_feats)
     targets_all = test_labels.detach().cpu().numpy()
     eval_metrics = get_eval_metrics(targets_all, preds_all, probs_all, True, prefix, roc_kwargs)
     dump = {"preds_all": preds_all, "probs_all": probs_all, "targets_all": targets_all}
-    conf_matrix = confusion_matrix(targets_all, preds_all)
-    print("Confusion Matrix:")
-    print(conf_matrix)
 
     return eval_metrics, dump
 
